@@ -1,0 +1,20 @@
+// Optional duckyPad key: shows the daemon's summary on the OLED.
+// The daemon writes _GV20 (most urgent state) and _GV21 (projects waiting on you).
+// State codes: 0 none, 1 idle, 2 done, 3 background, 4 working, 5 error, 6 waiting
+
+OLED_CLEAR
+OLED_CURSOR 0 40
+IF _GV20 == 6
+    OLED_CPRINT $_GV21 WAITING ON YOU
+ELSE IF _GV20 == 5
+    OLED_CPRINT API ERROR
+ELSE IF _GV20 == 4
+    OLED_CPRINT working...
+ELSE IF _GV20 == 3
+    OLED_CPRINT background agents
+ELSE IF _GV20 == 2
+    OLED_CPRINT all done
+ELSE
+    OLED_CPRINT idle
+END_IF
+OLED_UPDATE
