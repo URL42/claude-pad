@@ -30,7 +30,8 @@ switch doesn't wipe the status.
 ## Install
 
 1. Close the duckyPad configurator (it holds the device).
-2. `./install.sh`
+2. `./install.sh` (needs [uv](https://docs.astral.sh/uv/); the daemon gets its own venv in
+   `~/.claude-pad/.venv` with hidapi, so Python upgrades don't break it)
 3. Start a **new** Claude Code session.
 
 Uninstall: `./install.sh --uninstall`
@@ -38,7 +39,7 @@ Uninstall: `./install.sh --uninstall`
 ## Check it
 
 ```bash
-python3 duckypad_hid.py                 # top row flashes red, green, off
+~/.claude-pad/.venv/bin/python duckypad_hid.py   # top row flashes red, green, off
 tail -f ~/.claude-pad/daemon.log         # state changes, pad errors
 python3 -m unittest discover -s tests    # logic tests, no hardware needed
 ```
@@ -60,7 +61,7 @@ Create `~/.claude-pad/config.json` to override anything in `DEFAULTS` at the top
 
 `"layout": "per_project"` gives each project its own key instead of lighting the whole row.
 
-Then `launchctl kickstart -k gui/$(id -u)/com.claude-pad.daemon`.
+Then `launchctl kickstart -k gui/$(id -u)/com.claude-pad.daemon` to restart the daemon.
 
 ## Likely snags
 

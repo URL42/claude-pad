@@ -9,12 +9,20 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import duckypad_hid as hidmod
 import claude_pad_daemon as daemon
+import duckypad_hid as hidmod
 import merge_settings
+from claude_pad_daemon import (
+    DEFAULTS,
+    Pusher,
+    assign_slots,
+    build_frame,
+    build_gvs,
+    interrupted_at,
+    new_nudges,
+    project_states,
+)
 from claude_pad_hook import apply_event
-from claude_pad_daemon import (DEFAULTS, Pusher, assign_slots, build_frame,
-                               build_gvs, interrupted_at, new_nudges, project_states)
 
 
 def ev(name, **kw):
@@ -60,7 +68,7 @@ class HookTransitions(unittest.TestCase):
         self.assertEqual(r["state"], "done")
 
     def test_other_waiting_types(self):
-        for t in ("elicitation_dialog", "agent_needs_input"):
+        for t in ("elicitation_dialog", "elicitation_url_dialog", "agent_needs_input"):
             r = run(ev("UserPromptSubmit"), ev("Notification", notification_type=t))
             self.assertEqual(r["state"], "waiting", t)
 
@@ -435,6 +443,54 @@ class MergeSettings(unittest.TestCase):
         self.assertEqual(len(s["hooks"]["Stop"]), 2)
         s = merge_settings.merge(s, remove=True)
         self.assertEqual(s["hooks"], {"SubagentStart": [other], "Stop": [other]})
+
+    def test_uninstall_leaves_no_empty_hooks_key(self):
+        s = merge_settings.merge(merge_settings.merge({"model": "x"}), remove=True)
+        self.assertEqual(s, {"model": "x"})
+
+    def test_backups_pruned_and_write_is_atomic(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "settings.json")
+            for i in range(8):
+                open(f"{path}.bak-2026010{i}", "w").close()
+            open(f"{path}.bak-manual", "w").close()
+            merge_settings.prune_backups(path)
+            left = sorted(f for f in os.listdir(d) if ".bak-" in f)
+            self.assertEqual(left, [f"settings.json.bak-2026010{i}" for i in range(3, 8)]
+                             + ["settings.json.bak-manual"])
+            merge_settings.write_atomic(path, {"a": 1})
+            with open(path) as f:
+                self.assertEqual(json.load(f), {"a": 1})
+            self.assertEqual([f for f in os.listdir(d) if f.endswith(".tmp")], [])
+
+
+class Notify(unittest.TestCase):
+    def test_folder_name_is_an_argument_not_script(self):
+        calls = []
+        orig = daemon.subprocess.Popen
+        daemon.subprocess.Popen = lambda args, **kw: calls.append(args)
+        try:
+            daemon.notify('/x/evil" & do shell script "say hi', dict(DEFAULTS),
+                          lambda m: None)
+        finally:
+            daemon.subprocess.Popen = orig
+        if sys.platform != "darwin":
+            self.skipTest("banner is macOS only")
+        args = calls[0]
+        self.assertTrue(args[-1].startswith('evil" & do shell script'))
+        self.assertFalse(any("evil" in a for a in args[:-1]))
+
+
+class PusherImportError(unittest.TestCase):
+    def test_missing_hidapi_is_logged_not_raised(self):
+        class NoHid(FakePad):
+            def set_led(self, i, r, g, b):
+                raise ImportError("No module named 'hid'")
+        logs = []
+        p = Pusher(NoHid(), logs.append)
+        self.assertFalse(p.push({0: (1, 1, 1)}, {}))
+        self.assertFalse(p.push({0: (1, 1, 1)}, {}))
+        self.assertEqual(logs, ["pad: No module named 'hid'"])
 
 
 class Packets(unittest.TestCase):

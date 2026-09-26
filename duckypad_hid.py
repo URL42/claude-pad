@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 duckypad_hid.py - talk to a duckyPad Pro over its Counted Buffer HID interface.
 

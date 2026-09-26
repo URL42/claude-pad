@@ -12,10 +12,12 @@ Run by hand first:   python3 claude_pad_daemon.py --verbose
 
 import datetime
 import glob
+import http.client
 import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 
@@ -251,19 +253,27 @@ def read_sessions(now, cfg, state_dir=STATE_DIR):
 
 
 def notify(cwd, cfg, log):
+    """Banner and/or push. Never blocks the LED loop: both run in the background."""
     name = os.path.basename(cwd.rstrip("/")) or cwd
     msg = f"{name} is waiting on you"
     if cfg["mac_notify"] and sys.platform == "darwin":
-        subprocess.run(["osascript", "-e",
-                        f'display notification "{msg}" with title "Claude Code"'],
-                       check=False, timeout=5)
+        # Text goes in as an argument, not spliced into the script, so a quote in a
+        # folder name can't break (or inject into) the AppleScript.
+        subprocess.Popen(["osascript",
+                          "-e", "on run argv",
+                          "-e", 'display notification (item 1 of argv) with title "Claude Code"',
+                          "-e", "end run", msg],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if cfg["ntfy_url"]:
-        try:
-            req = urllib.request.Request(cfg["ntfy_url"], data=msg.encode(),
-                                         headers={"Title": "Claude Code"})
-            urllib.request.urlopen(req, timeout=5)
-        except Exception as e:
-            log(f"ntfy failed: {e}")
+        threading.Thread(target=_ntfy, args=(cfg["ntfy_url"], msg, log), daemon=True).start()
+
+
+def _ntfy(url, msg, log):
+    try:
+        req = urllib.request.Request(url, data=msg.encode(), headers={"Title": "Claude Code"})
+        urllib.request.urlopen(req, timeout=5).close()
+    except (OSError, ValueError, http.client.HTTPException) as e:  # URLError is an OSError
+        log(f"ntfy failed: {e}")
 
 
 class Pusher:
@@ -279,7 +289,7 @@ class Pusher:
         self.leds, self.gvs = {}, {}
 
     def push(self, frame, gvs):
-        from duckypad_hid import DuckyPadBusy, DuckyPadNotFound, DuckyPadError
+        from duckypad_hid import DuckyPadBusy, DuckyPadError, DuckyPadNotFound
         try:
             for led, rgb in sorted(frame.items()):
                 if self.leds.get(led) != rgb:
@@ -291,7 +301,9 @@ class Pusher:
                 self.gvs.update(changed)
         except DuckyPadBusy:
             return False
-        except (DuckyPadNotFound, DuckyPadError, OSError) as e:
+        except (DuckyPadNotFound, DuckyPadError, OSError, ImportError) as e:
+            # ImportError: hidapi missing. Log once and keep going rather than
+            # crash-looping under launchd.
             msg = f"pad: {e}"
             if msg != self.last_err:
                 self.log(msg)

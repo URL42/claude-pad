@@ -194,7 +194,9 @@ def write_state(path, event, pid):
 def main():
     try:
         event = json.load(sys.stdin)
-    except Exception:
+    except ValueError:  # includes JSONDecodeError and bad UTF-8
+        return
+    if not isinstance(event, dict):
         return
     sid = event.get("session_id")
     if not sid:
