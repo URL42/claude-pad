@@ -6,7 +6,12 @@ It never touches the duckyPad; the daemon owns the device. This keeps hooks fast
 and means a busy pad can never slow Claude Code down.
 
 States: idle, working, waiting (needs a decision), background (turn ended but
-background subagents still running), done, error.
+background tasks still running), done, error.
+
+Esc and denied permissions end a turn without a Stop event; the daemon spots those
+in the transcript (see claude_pad_daemon.interrupted_at), so the record keeps the
+transcript path. It also keeps the Claude Code pid, so the daemon can drop sessions
+whose process died without a SessionEnd.
 
 Hooks for one session can fire at the same moment (parallel tools, subagents), so
 the read-modify-write happens under one lock shared by all sessions.
@@ -37,42 +42,48 @@ WAITING_TYPES = {"permission_prompt", "elicitation_dialog", "agent_needs_input",
                  "elicitation_url_dialog"}
 
 
+TOOL_EVENTS = ("PostToolUse", "PostToolUseFailure")
+
+
 def apply_event(prev, event):
     """Pure state transition. Returns the new record, or None to delete it."""
     name = event.get("hook_event_name", "")
-    rec = dict(prev) if prev else {"state": "idle", "bg_agents": []}
-    rec["bg_agents"] = list(rec.get("bg_agents", []))
+    if name in TOOL_EVENTS and event.get("agent_id"):
+        return prev  # a subagent's tool call: says nothing about the main agent
+    rec = dict(prev) if prev else {"state": "idle", "bg_tasks": 0}
+    rec.pop("bg_agents", None)  # pre-background_tasks records
     rec["cwd"] = event.get("cwd") or rec.get("cwd", "")
+    rec["transcript"] = event.get("transcript_path") or rec.get("transcript", "")
 
     if name == "SessionEnd":
         return None
     if name == "SessionStart":
         rec["state"] = "idle"
-        rec["bg_agents"] = []
-    elif name in ("UserPromptSubmit", "PostToolUse", "PostToolUseFailure"):
+        rec["bg_tasks"] = 0
+    elif name == "UserPromptSubmit" or name in TOOL_EVENTS:
         rec["state"] = "working"      # PostToolUse clears amber after you approve
     elif name == "Notification":
         ntype = event.get("notification_type", "")
         if ntype in WAITING_TYPES:
             rec["state"] = "waiting"
-    elif name == "SubagentStart":
-        if event.get("background") and event.get("agent_id"):
-            if event["agent_id"] not in rec["bg_agents"]:
-                rec["bg_agents"].append(event["agent_id"])
-    elif name == "SubagentStop":
-        aid = event.get("agent_id")
-        if aid in rec["bg_agents"]:
-            rec["bg_agents"].remove(aid)
-        if rec["state"] == "background" and not rec["bg_agents"]:
-            rec["state"] = "done"
-    elif name == "Stop":
-        rec["state"] = "background" if rec["bg_agents"] else "done"
+    elif name in ("Stop", "SubagentStop"):
+        # Both carry Claude Code's own list of background tasks (agents and shells).
+        # A finished background task starts a new turn, whose Stop updates this.
+        running = sum(1 for t in event.get("background_tasks") or []
+                      if t.get("status") == "running")
+        rec["bg_tasks"] = running
+        if name == "Stop" or rec["state"] in ("background", "done"):
+            rec["state"] = "background" if running else "done"
     elif name == "StopFailure":
         rec["state"] = "error"
     else:
         return prev  # unknown event: leave file untouched
 
-    rec["ts"] = time.time()
+    # ts = when this state began. The daemon compares it with interrupt times, so
+    # repeats (e.g. the internal SubagentStop that follows an Esc) must not bump it.
+    # A new prompt always does: it's a new turn even if the key was stuck blue.
+    if not prev or rec["state"] != prev.get("state") or name == "UserPromptSubmit":
+        rec["ts"] = time.time()
     return rec
 
 
@@ -131,7 +142,11 @@ def debug_record(event):
     return json.dumps(rec) + "\n"
 
 
-def write_state(path, event):
+def _without_ts(rec):
+    return {k: v for k, v in rec.items() if k != "ts"}
+
+
+def write_state(path, event, pid):
     prev = None
     try:
         with open(path) as f:
@@ -146,9 +161,11 @@ def write_state(path, event):
         except OSError:
             pass
         return
-    if prev is not None and new.get("state") == prev.get("state") \
-            and new.get("bg_agents") == prev.get("bg_agents"):
-        return  # nothing changed (e.g. PostToolUse mid-turn) - skip the write
+    new["pid"] = pid
+    if event.get("hook_event_name") in TOOL_EVENTS and prev is not None \
+            and _without_ts(new) == _without_ts(prev):
+        return  # PostToolUse mid-turn changes nothing - skip the write. Other events
+        # always write: the daemon compares ts against interrupt times.
 
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
     try:
@@ -179,7 +196,8 @@ def main():
         if line:
             with contextlib.suppress(OSError), open(EVENTS_LOG, "a") as f:
                 f.write(line)
-        write_state(os.path.join(STATE_DIR, f"{sid}.json"), event)
+        # Our parent is the Claude Code process itself (checked with debug capture).
+        write_state(os.path.join(STATE_DIR, f"{sid}.json"), event, os.getppid())
 
 
 if __name__ == "__main__":

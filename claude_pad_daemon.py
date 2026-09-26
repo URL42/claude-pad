@@ -3,13 +3,14 @@
 claude_pad_daemon.py - owns the duckyPad. Reads the state files the hook writes,
 works out one colour per project, and pushes only what changed.
 
-  blue    working            purple  turn ended, background subagents running
+  blue    working            purple  turn ended, background tasks running
   amber   WAITING ON YOU     green   done (fades to dim after STALE_DONE_S)
   red     API error          dim     idle / session open, nothing pending
 
 Run by hand first:   python3 claude_pad_daemon.py --verbose
 """
 
+import datetime
 import glob
 import json
 import os
@@ -25,10 +26,12 @@ CONFIG_FILE = os.path.join(HOME, "config.json")
 
 DEFAULTS = {
     "slots": [0, 1, 2, 3],          # LED indices used as agent keys (top row)
+    "layout": "row",                # "row": all slots show the most urgent state;
+                                    # "per_project": one slot per project
     "poll_s": 0.5,
     "resync_s": 10,                 # re-push everything (profile switches repaint LEDs)
     "stale_done_s": 1800,           # green fades to dim after 30 min
-    "dead_session_s": 43200,        # ignore state files untouched for 12 h
+    "dead_session_s": 43200,        # no live Claude pid on record: ignore after 12 h
     "gv_worst_state": 20,           # _GV20 = most urgent state code (see STATE_CODE)
     "gv_waiting_count": 21,         # _GV21 = number of projects waiting on you
     "mac_notify": True,             # macOS banner when a project starts waiting
@@ -75,8 +78,11 @@ def project_states(sessions, now, cfg):
     by_cwd = {}
     for rec in sessions:
         state = rec.get("state", "idle")
-        if state == "done" and now - rec.get("ts", now) > cfg["stale_done_s"]:
+        age = now - rec.get("ts", now)
+        if state == "done" and age > cfg["stale_done_s"]:
             state = "idle"
+        if state == "background" and age > cfg["dead_session_s"]:
+            state = "idle"  # a task that vanished without ending the turn
         by_cwd.setdefault(rec.get("cwd", "?"), []).append(state)
     return {cwd: worst(states) for cwd, states in by_cwd.items()}
 
@@ -99,17 +105,25 @@ def assign_slots(projects, slot_map, slots):
     return slot_map
 
 
+def _state_rgb(state, tick, colors):
+    rgb = colors[state]
+    if state == "waiting" and tick % 2:              # pulse: full / 25%
+        rgb = [c // 4 for c in rgb]
+    return tuple(rgb)
+
+
 def build_frame(projects, slot_map, slots, tick, cfg):
     colors = cfg["colors"]
     frame = {s: tuple(colors["empty"]) for s in slots}
+    if cfg["layout"] == "row":
+        state = worst(set(projects.values()))
+        if state is not None:
+            frame = {s: _state_rgb(state, tick, colors) for s in slots}
+        return frame
     for cwd, slot in slot_map.items():
         state = projects.get(cwd)
-        if state is None:
-            continue
-        rgb = colors[state]
-        if state == "waiting" and tick % 2:          # pulse: full / 25%
-            rgb = [c // 4 for c in rgb]
-        frame[slot] = tuple(rgb)
+        if state is not None:
+            frame[slot] = _state_rgb(state, tick, colors)
     return frame
 
 
@@ -121,15 +135,105 @@ def build_gvs(projects, cfg):
 
 # ---------- side effects ----------
 
-def read_sessions(now, cfg):
-    out = []
-    for path in glob.glob(os.path.join(STATE_DIR, "*.json")):
+INTERRUPT_MARK = "[Request interrupted by user"   # also "... for tool use]" (deny)
+TAIL_BYTES = 64 * 1024
+_interrupt_cache = {}   # transcript path -> ((mtime, size), interrupted-at or None)
+
+
+def _entry_text(entry):
+    content = (entry.get("message") or {}).get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return "".join(c.get("text") or "" for c in content
+                   if isinstance(c, dict) and c.get("type") == "text")
+
+
+def interrupted_at(lines):
+    """Given transcript lines, return the epoch time of an Esc/deny interrupt if it is
+    the last user or assistant entry, else None. Esc and deny end the turn without a
+    Stop hook, and this marker is the only trace. Transcript format is Claude Code's
+    own, not a documented API: if it changes, this returns None and keys stay blue."""
+    for line in reversed(lines):
         try:
-            if now - os.path.getmtime(path) > cfg["dead_session_s"]:
-                continue
+            entry = json.loads(line)
+        except ValueError:
+            continue  # the partial first line of a tail read
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("type") not in ("user", "assistant"):
+            continue  # system / attachment entries come after the marker
+        if entry.get("type") == "user" and _entry_text(entry).startswith(INTERRUPT_MARK):
+            try:
+                ts = entry["timestamp"].replace("Z", "+00:00")
+                return datetime.datetime.fromisoformat(ts).timestamp()
+            except (KeyError, ValueError):
+                return None
+        return None
+    return None
+
+
+def transcript_interrupted_at(path):
+    """interrupted_at() for a transcript file, re-read only when the file changes."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = (st.st_mtime, st.st_size)
+    cached = _interrupt_cache.get(path)
+    if cached and cached[0] == key:
+        return cached[1]
+    with open(path, "rb") as f:
+        f.seek(max(0, st.st_size - TAIL_BYTES))
+        lines = f.read().decode("utf-8", "replace").splitlines()
+    result = interrupted_at(lines)
+    _interrupt_cache[path] = (key, result)
+    return result
+
+
+_pid_is_claude = {}
+
+
+def session_process(pid):
+    """"dead", "claude" (alive and named claude) or "unknown" (alive, other name - a
+    reused pid, or Claude Code running under another binary name)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        _pid_is_claude.pop(pid, None)
+        return "dead"
+    except PermissionError:
+        pass  # exists, owned by someone else
+    if pid not in _pid_is_claude:
+        comm = subprocess.run(["ps", "-o", "comm=", "-p", str(pid)], capture_output=True,
+                              text=True, check=False, timeout=2).stdout.strip()
+        _pid_is_claude[pid] = os.path.basename(comm).lower() == "claude"
+    return "claude" if _pid_is_claude[pid] else "unknown"
+
+
+def read_sessions(now, cfg, state_dir=STATE_DIR):
+    out = []
+    for path in glob.glob(os.path.join(state_dir, "*.json")):
+        try:
             with open(path) as f:
-                out.append(json.load(f))
-        except (OSError, ValueError):
+                rec = json.load(f)
+            proc = session_process(rec["pid"]) if rec.get("pid") else "unknown"
+            if proc == "dead":
+                # Died without a SessionEnd (killed, crashed). Re-read first: a resumed
+                # session may have just rewritten this file with a new pid.
+                with open(path) as f:
+                    if json.load(f).get("pid") == rec["pid"]:
+                        os.remove(path)
+                continue
+            if proc != "claude" and now - os.path.getmtime(path) > cfg["dead_session_s"]:
+                continue
+            if rec.get("state") in ("working", "waiting") and rec.get("transcript"):
+                t = transcript_interrupted_at(rec["transcript"])
+                if t is not None and t > rec.get("ts", 0):
+                    rec["state"] = "background" if rec.get("bg_tasks") else "idle"
+            out.append(rec)
+        except (OSError, ValueError, subprocess.SubprocessError):
             continue
     return out
 

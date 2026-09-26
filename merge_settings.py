@@ -12,9 +12,10 @@ CMD = 'python3 "$HOME/.claude-pad/claude_pad_hook.py"'
 WAITING = "permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input"
 EVENTS = {  # event -> matcher (None = no matcher)
     "SessionStart": None, "UserPromptSubmit": None, "PostToolUse": None,
-    "PostToolUseFailure": None, "Notification": WAITING, "SubagentStart": None,
+    "PostToolUseFailure": None, "Notification": WAITING,
     "SubagentStop": None, "Stop": None, "StopFailure": None, "SessionEnd": None,
 }
+RETIRED = ["SubagentStart"]  # ours in older installs; always taken out
 
 
 def ours(group):
@@ -23,9 +24,10 @@ def ours(group):
 
 def merge(settings, remove=False):
     hooks = settings.setdefault("hooks", {})
-    for event, matcher in EVENTS.items():
+    for event in [*EVENTS, *RETIRED]:
+        matcher = EVENTS.get(event)
         groups = [g for g in hooks.get(event, []) if not ours(g)]
-        if not remove:
+        if not remove and event in EVENTS:
             group = {"hooks": [{"type": "command", "command": CMD, "timeout": 5}]}
             if matcher:
                 group["matcher"] = matcher

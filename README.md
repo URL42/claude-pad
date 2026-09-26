@@ -1,15 +1,16 @@
 # claude-pad
 
-Claude Code agent status on a duckyPad Pro. One top-row key per project:
+Claude Code agent status on a duckyPad Pro. The whole top row shows the most
+urgent state across all your sessions (or one key per project, see Config):
 
 | Colour | Meaning |
 |---|---|
 | blue | working |
 | **amber, pulsing** | **waiting on you** (permission, question, input) — also a macOS banner |
-| purple | turn ended, background subagents still running |
+| purple | turn ended, background tasks (agents, shells) still running |
 | green | done (fades to dim after 30 min) |
 | red | API error |
-| dim white | session open, idle |
+| dim white | session open, idle (also after Esc or a denied permission) |
 
 ## How it works
 
@@ -53,6 +54,8 @@ Create `~/.claude-pad/config.json` to override anything in `DEFAULTS` at the top
 { "slots": [0, 1, 2, 3], "ntfy_url": "https://ntfy.sh/your-topic", "mac_notify": true }
 ```
 
+`"layout": "per_project"` gives each project its own key instead of lighting the whole row.
+
 Then `launchctl kickstart -k gui/$(id -u)/com.claude-pad.daemon`.
 
 ## Likely snags
@@ -62,7 +65,7 @@ Then `launchctl kickstart -k gui/$(id -u)/com.claude-pad.daemon`.
   line `install.sh` prints.
 - **Keys flicker back to profile colours:** that's the profile repainting; the
   daemon wins it back within 10 s. Lower `resync_s` if it bugs you.
-- **More than 4 projects:** extra ones don't get a key (nobody gets bumped), but
-  they still count in `_GV20/_GV21`.
+- **More than 4 projects (per_project layout):** extra ones don't get a key (nobody
+  gets bumped), but they still count in `_GV20/_GV21`.
 
 `status_key.txt` is an optional duckyPad key script that prints the summary on the OLED.
