@@ -48,8 +48,10 @@ TOOL_EVENTS = ("PostToolUse", "PostToolUseFailure")
 def apply_event(prev, event):
     """Pure state transition. Returns the new record, or None to delete it."""
     name = event.get("hook_event_name", "")
-    if name in TOOL_EVENTS and event.get("agent_id"):
-        return prev  # a subagent's tool call: says nothing about the main agent
+    if name in TOOL_EVENTS and event.get("agent_id") \
+            and not (prev and prev.get("state") == "waiting"):
+        return prev  # a subagent's tool call says nothing about the main agent -
+        # unless it's the one you just approved, which ends the wait
     rec = dict(prev) if prev else {"state": "idle", "bg_tasks": 0}
     rec.pop("bg_agents", None)  # pre-background_tasks records
     rec["cwd"] = event.get("cwd") or rec.get("cwd", "")
@@ -62,10 +64,18 @@ def apply_event(prev, event):
         rec["bg_tasks"] = 0
     elif name == "UserPromptSubmit" or name in TOOL_EVENTS:
         rec["state"] = "working"      # PostToolUse clears amber after you approve
+    elif name == "PermissionRequest":
+        rec["state"] = "waiting"      # fires the moment a permission dialog appears
+        rec.pop("nudge_ts", None)     # a new wait
     elif name == "Notification":
+        # Claude Code's own nudge, ~6 s after a prompt goes unanswered. The daemon
+        # sends the banner/push on this, not on PermissionRequest: nothing fires when
+        # you approve, so a timer would banner quick approvals of slow commands.
+        # Also the only signal for elicitation dialogs (no PermissionRequest).
         ntype = event.get("notification_type", "")
         if ntype in WAITING_TYPES:
             rec["state"] = "waiting"
+            rec["nudge_ts"] = time.time()
     elif name in ("Stop", "SubagentStop"):
         # Both carry Claude Code's own list of background tasks (agents and shells).
         # A finished background task starts a new turn, whose Stop updates this.
@@ -78,6 +88,9 @@ def apply_event(prev, event):
         rec["state"] = "error"
     else:
         return prev  # unknown event: leave file untouched
+
+    if rec["state"] != "waiting":
+        rec.pop("nudge_ts", None)
 
     # ts = when this state began. The daemon compares it with interrupt times, so
     # repeats (e.g. the internal SubagentStop that follows an Esc) must not bump it.

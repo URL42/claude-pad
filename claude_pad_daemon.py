@@ -34,7 +34,7 @@ DEFAULTS = {
     "dead_session_s": 43200,        # no live Claude pid on record: ignore after 12 h
     "gv_worst_state": 20,           # _GV20 = most urgent state code (see STATE_CODE)
     "gv_waiting_count": 21,         # _GV21 = number of projects waiting on you
-    "mac_notify": True,             # macOS banner when a project starts waiting
+    "mac_notify": True,             # macOS banner when a prompt is left unanswered
     "ntfy_url": "",                 # e.g. https://ntfy.sh/your-topic or an n8n webhook
     "colors": {
         "empty": [0, 0, 0],
@@ -125,6 +125,18 @@ def build_frame(projects, slot_map, slots, tick, cfg):
         if state is not None:
             frame[slot] = _state_rgb(state, tick, colors)
     return frame
+
+
+def new_nudges(sessions, seen):
+    """cwds to banner: sessions still waiting whose Claude Code "unanswered" nudge
+    (nudge_ts, set by the hook) we haven't announced yet. seen is updated in place
+    and pruned to nudges that are still live."""
+    live = {(r.get("cwd", "?"), r["nudge_ts"]) for r in sessions
+            if r.get("state") == "waiting" and r.get("nudge_ts")}
+    due = sorted({cwd for cwd, _ in live - seen})
+    seen.intersection_update(live)
+    seen.update(live)
+    return due
 
 
 def build_gvs(projects, cfg):
@@ -306,10 +318,11 @@ def main():
         slot_map = {}
 
     pusher = Pusher(pad, log)
-    last_states, last_resync, tick = {}, time.time(), 0
+    last_states, nudged, last_resync, tick = {}, set(), time.time(), 0
     while True:
         now = time.time()
-        projects = project_states(read_sessions(now, cfg), now, cfg)
+        sessions = read_sessions(now, cfg)
+        projects = project_states(sessions, now, cfg)
 
         new_map = assign_slots(projects, slot_map, cfg["slots"])
         if new_map != slot_map:
@@ -320,9 +333,9 @@ def main():
         for cwd, state in projects.items():
             if state != last_states.get(cwd):
                 log(f"{os.path.basename(cwd)}: {last_states.get(cwd)} -> {state}")
-                if state == "waiting":
-                    notify(cwd, cfg, log)
         last_states = projects
+        for cwd in new_nudges(sessions, nudged):
+            notify(cwd, cfg, log)
 
         if now - last_resync > cfg["resync_s"]:
             pusher.forget()

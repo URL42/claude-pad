@@ -6,7 +6,7 @@ urgent state across all your sessions (or one key per project, see Config):
 | Colour | Meaning |
 |---|---|
 | blue | working |
-| **amber, pulsing** | **waiting on you** (permission, question, input) — also a macOS banner |
+| **amber, pulsing** | **waiting on you** (permission, question, input) — plus a macOS banner if you leave it unanswered |
 | purple | turn ended, background tasks (agents, shells) still running |
 | green | done (fades to dim after 30 min) |
 | red | API error |
@@ -43,7 +43,11 @@ tail -f ~/.claude-pad/daemon.log         # state changes, pad errors
 python3 -m unittest discover -s tests    # logic tests, no hardware needed
 ```
 
-Then ask Claude Code to run something that needs permission. Its key should go amber and a banner should appear.
+Then ask Claude Code to run something that needs permission. The top row should go amber at once, and a banner appears if you leave the prompt
+unanswered for a few seconds.
+
+A command you approve keeps the row amber until it finishes: Claude Code sends no
+event at the moment you approve.
 
 ## Config
 

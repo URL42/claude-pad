@@ -14,7 +14,7 @@ import claude_pad_daemon as daemon
 import merge_settings
 from claude_pad_hook import apply_event
 from claude_pad_daemon import (DEFAULTS, Pusher, assign_slots, build_frame,
-                               build_gvs, interrupted_at, project_states)
+                               build_gvs, interrupted_at, new_nudges, project_states)
 
 
 def ev(name, **kw):
@@ -41,6 +41,18 @@ class HookTransitions(unittest.TestCase):
         self.assertEqual(r["state"], "waiting")
         r = apply_event(r, ev("PostToolUse", tool_name="Bash"))
         self.assertEqual(r["state"], "working")
+
+    def test_permission_request_goes_amber_at_once(self):
+        r = run(ev("UserPromptSubmit"), ev("PermissionRequest", tool_name="Bash"))
+        self.assertEqual(r["state"], "waiting")
+        self.assertNotIn("nudge_ts", r)                # no banner yet
+        # Claude's unanswered nudge: marks it for a banner, keeps ts (deny detection)
+        ts = r["ts"]
+        r = apply_event(r, ev("Notification", notification_type="permission_prompt"))
+        self.assertEqual((r["state"], r["ts"]), ("waiting", ts))
+        self.assertIn("nudge_ts", r)
+        r = apply_event(r, ev("PostToolUse"))           # approved
+        self.assertNotIn("nudge_ts", r)
 
     def test_idle_prompt_is_not_waiting(self):
         r = run(ev("UserPromptSubmit"), ev("Stop"),
@@ -92,6 +104,11 @@ class HookTransitions(unittest.TestCase):
         r = run(ev("UserPromptSubmit"))
         r["ts"] = 100.0
         self.assertGreater(apply_event(r, ev("UserPromptSubmit"))["ts"], 100.0)
+
+    def test_subagent_approval_ends_wait(self):
+        r = run(ev("UserPromptSubmit"), ev("PermissionRequest", agent_id="fg1"),
+                ev("PostToolUse", agent_id="fg1"))
+        self.assertEqual(r["state"], "working")
 
     def test_record_keeps_transcript(self):
         r = run(ev("UserPromptSubmit", transcript_path="/t.jsonl"), ev("Stop"))
@@ -165,6 +182,23 @@ class DaemonLogic(unittest.TestCase):
         self.assertEqual(set(f.values()), {tuple(colors["working"])})
         self.assertEqual(set(build_frame({}, {}, [0, 1], 0, self.cfg).values()),
                          {tuple(colors["empty"])})
+
+    def test_banner_once_per_claude_nudge(self):
+        seen = set()
+        waiting = [{"cwd": "/a", "state": "waiting"}]           # PermissionRequest only
+        self.assertEqual(new_nudges(waiting, seen), [])
+        nudged = [{"cwd": "/a", "state": "waiting", "nudge_ts": 5.0}]
+        self.assertEqual(new_nudges(nudged, seen), ["/a"])
+        self.assertEqual(new_nudges(nudged, seen), [])          # once
+        self.assertEqual(new_nudges([{"cwd": "/a", "state": "working"}], seen), [])
+        self.assertEqual(seen, set())
+        again = [{"cwd": "/a", "state": "waiting", "nudge_ts": 9.0}]
+        self.assertEqual(new_nudges(again, seen), ["/a"])       # next unanswered prompt
+
+    def test_interrupted_wait_never_banners(self):
+        # read_sessions already turned a denied prompt into idle
+        self.assertEqual(new_nudges([{"cwd": "/a", "state": "idle", "nudge_ts": 5.0}],
+                                    set()), [])
 
     def test_gvs(self):
         g = build_gvs({"/a": "waiting", "/b": "working", "/c": "waiting"}, self.cfg)

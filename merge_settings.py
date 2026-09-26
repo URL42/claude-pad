@@ -12,7 +12,7 @@ CMD = 'python3 "$HOME/.claude-pad/claude_pad_hook.py"'
 WAITING = "permission_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input"
 EVENTS = {  # event -> matcher (None = no matcher)
     "SessionStart": None, "UserPromptSubmit": None, "PostToolUse": None,
-    "PostToolUseFailure": None, "Notification": WAITING,
+    "PostToolUseFailure": None, "Notification": WAITING, "PermissionRequest": None,
     "SubagentStop": None, "Stop": None, "StopFailure": None, "SessionEnd": None,
 }
 RETIRED = ["SubagentStart"]  # ours in older installs; always taken out
